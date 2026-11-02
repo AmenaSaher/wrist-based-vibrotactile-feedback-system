@@ -1,0 +1,590 @@
+
+%% FOUR-LRA WRIST RECOGNITION EXPERIMENT
+% Block 1: Single motors (20 + 5 catch = 25 trials)
+% Block 2: Simultaneous pairs (30 + 5 catch = 35 trials)
+% Block 3: Sequential pairs (60 + 5 catch = 65 trials)
+% Total: 125 trials
+%
+% Requires compatible LRA_Recognition_Arduino firmware.
+%
+% Arduino commands:
+%   A,8,1000
+%   SIM,AB,8,12,1000
+%   SEQ,AB,8,12,1000
+%
+% Sequential: second motor begins after first 1000 ms pulse.
+% ResponseDelaySec starts AFTER Arduino DONE.
+%
+% IMPORTANT: Verify hardware, timing, motor mapping,
+% and safe/comfortable stimulation before testing.
+
+clear; clc; close all;
+
+%% 1. EXPERIMENT SETTINGS
+
+port = "COM5";
+baud = 115200;
+
+labels = ["A","B","C","D"];
+locations = ["Dorsal","Radial","Ulnar","Volar"];
+
+% Selected from previous adaptive detection results
+rtpValues = [8 12 18 22];
+
+pulseDuration = 1000;
+responseWindow = 5.0;
+
+repetitions = 5;
+catchPerBlock = 5;
+
+breakEvery = 25;
+
+rng('shuffle');
+
+%% 2. GENERATE BALANCED BLOCKED TRIALS
+
+kind = strings(0,1);
+pattern = strings(0,1);
+blockNumber = zeros(0,1);
+
+% BLOCK 1: SINGLE MOTORS
+
+blockKind = strings(0,1);
+blockPattern = strings(0,1);
+
+for k = 1:repetitions
+    for a = 1:4
+        blockKind(end+1,1) = "SINGLE";
+        blockPattern(end+1,1) = labels(a);
+    end
+end
+
+blockKind = [blockKind; ...
+    repmat("CATCH",catchPerBlock,1)];
+
+blockPattern = [blockPattern; ...
+    repmat("N",catchPerBlock,1)];
+
+perm = randperm(numel(blockKind));
+
+kind = [kind; blockKind(perm)];
+pattern = [pattern; blockPattern(perm)];
+blockNumber = [blockNumber; ...
+    ones(numel(blockKind),1)];
+
+% BLOCK 2: SIMULTANEOUS PAIRS
+
+blockKind = strings(0,1);
+blockPattern = strings(0,1);
+
+for k = 1:repetitions
+    for a = 1:3
+        for b = a+1:4
+            blockKind(end+1,1) = "SIM";
+            blockPattern(end+1,1) = ...
+                labels(a) + labels(b);
+        end
+    end
+end
+
+blockKind = [blockKind; ...
+    repmat("CATCH",catchPerBlock,1)];
+
+blockPattern = [blockPattern; ...
+    repmat("N",catchPerBlock,1)];
+
+perm = randperm(numel(blockKind));
+
+kind = [kind; blockKind(perm)];
+pattern = [pattern; blockPattern(perm)];
+blockNumber = [blockNumber; ...
+    2*ones(numel(blockKind),1)];
+
+% BLOCK 3: SEQUENTIAL PAIRS
+
+blockKind = strings(0,1);
+blockPattern = strings(0,1);
+
+for k = 1:repetitions
+    for a = 1:4
+        for b = 1:4
+
+            if a == b
+                continue;
+            end
+
+            blockKind(end+1,1) = "SEQ";
+            blockPattern(end+1,1) = ...
+                labels(a) + labels(b);
+        end
+    end
+end
+
+blockKind = [blockKind; ...
+    repmat("CATCH",catchPerBlock,1)];
+
+blockPattern = [blockPattern; ...
+    repmat("N",catchPerBlock,1)];
+
+perm = randperm(numel(blockKind));
+
+kind = [kind; blockKind(perm)];
+pattern = [pattern; blockPattern(perm)];
+blockNumber = [blockNumber; ...
+    3*ones(numel(blockKind),1)];
+
+totalTrials = numel(kind);
+
+fprintf('\nTotal trials: %d\n',totalTrials);
+fprintf('Block 1: %d trials\n',sum(blockNumber==1));
+fprintf('Block 2: %d trials\n',sum(blockNumber==2));
+fprintf('Block 3: %d trials\n',sum(blockNumber==3));
+
+assert(totalTrials==125, ...
+    'Unexpected trial count.');
+
+%% 3. CREATE RESULTS FILE
+
+stamp = string(datetime('now', ...
+    'Format','yyyyMMdd_HHmmss'));
+
+filename = "LRA_Recognition_Blocked_" + ...
+    stamp + ".csv";
+
+results = table('Size',[0 17], ...
+    'VariableTypes',{ ...
+    'double','double','string','string', ...
+    'double','double','double','double', ...
+    'string','logical','logical','logical', ...
+    'string','double','double','double','string'}, ...
+    'VariableNames',{ ...
+    'Trial','Block','Condition','PresentedPattern', ...
+    'RTP1','RTP2','DurationMs','OnsetIntervalMs', ...
+    'Response','Correct','LocationsCorrect','OrderCorrect', ...
+    'ArduinoStatus','ResponseDelaySec', ...
+    'Timestamp','ValidTrial','Notes'});
+
+writetable(results,filename);
+
+%% 4. CONNECT TO ARDUINO
+
+disp('Connecting to Arduino...');
+
+s = serialport(port,baud);
+configureTerminator(s,"LF");
+s.Timeout = 5;
+
+pause(2);
+flush(s);
+
+cleanupObj = onCleanup(@() clearSerial(s));
+
+disp('Arduino connected.');
+
+%% 5. RESPONSE WINDOW
+
+fig = figure( ...
+    'Name','Wrist Recognition Experiment', ...
+    'NumberTitle','off', ...
+    'MenuBar','none', ...
+    'ToolBar','none', ...
+    'Color','white', ...
+    'Position',[350 200 750 390], ...
+    'CloseRequestFcn',@closeExperiment);
+
+setappdata(fig,'Abort',false);
+setappdata(fig,'Response',"");
+setappdata(fig,'Accept',false);
+setappdata(fig,'Submitted',false);
+
+fig.WindowKeyPressFcn = @keyResponse;
+
+ax = axes( ...
+    'Parent',fig, ...
+    'Position',[0 0 1 1], ...
+    'Visible','off');
+
+showText(ax, ...
+    "FOUR-LRA RECOGNITION EXPERIMENT" + newline + ...
+    "125 trials in 3 blocks" + newline + newline + ...
+    "Single: A/B/C/D" + newline + ...
+    "Pairs: type two letters" + newline + ...
+    "Catch: N" + newline + ...
+    "ENTER submits response" + newline + ...
+    "ESC stops experiment");
+
+input('Press ENTER in MATLAB to begin.','s');
+
+%% 6. RUN EXPERIMENT
+
+previousBlock = 0;
+
+for t = 1:totalTrials
+
+    if ~ishandle(fig)
+        break;
+    end
+
+    if getappdata(fig,'Abort')
+        break;
+    end
+
+    currentBlock = blockNumber(t);
+
+    % Block instructions
+    if currentBlock ~= previousBlock
+
+        if currentBlock == 1
+            message = ...
+                "BLOCK 1: SINGLE MOTORS" + newline + ...
+                "Identify A, B, C, or D.";
+
+        elseif currentBlock == 2
+            message = ...
+                "BLOCK 2: SIMULTANEOUS PAIRS" + newline + ...
+                "Identify both motors." + newline + ...
+                "Order does not matter.";
+
+        else
+            message = ...
+                "BLOCK 3: SEQUENTIAL PAIRS" + newline + ...
+                "Identify both motors IN ORDER.";
+        end
+
+        showText(ax,message);
+
+        fprintf('\n%s\n',message);
+        input('Press ENTER to begin block.','s');
+
+        previousBlock = currentBlock;
+    end
+
+    % Breaks within blocks
+    if t > 1 && mod(t-1,breakEvery)==0 && ...
+            currentBlock==blockNumber(t-1)
+
+        showText(ax, ...
+            "BREAK" + newline + ...
+            "Rest before continuing.");
+
+        input('Press ENTER to resume.','s');
+    end
+
+    if ~ishandle(fig) || getappdata(fig,'Abort')
+        break;
+    end
+
+    cond = kind(t);
+    pat = pattern(t);
+
+    showText(ax, ...
+        sprintf('Trial %d of %d\n\nGet ready', ...
+        t,totalTrials));
+
+    pause(1+rand);
+
+    if ~ishandle(fig) || getappdata(fig,'Abort')
+        break;
+    end
+
+    %% 7. PRESENT STIMULUS
+
+    r1 = 0;
+    r2 = 0;
+    interval = NaN;
+    status = "CATCH";
+
+    if cond ~= "CATCH"
+
+        motor1 = extractBetween(pat,1,1);
+        a = find(labels==motor1,1);
+
+        r1 = rtpValues(a);
+
+        if cond == "SINGLE"
+
+            cmd = sprintf('%s,%d,%d', ...
+                char(pat),r1,pulseDuration);
+
+        else
+
+            motor2 = extractBetween(pat,2,2);
+            b = find(labels==motor2,1);
+
+            r2 = rtpValues(b);
+
+            cmd = sprintf('%s,%s,%d,%d,%d', ...
+                char(cond),char(pat), ...
+                r1,r2,pulseDuration);
+
+            if cond == "SEQ"
+                interval = pulseDuration;
+            else
+                interval = 0;
+            end
+        end
+
+        writeline(s,cmd);
+
+        status = "TIMEOUT";
+        waitClock = tic;
+
+        while toc(waitClock) < 7
+
+            if s.NumBytesAvailable > 0
+
+                msg = string(strtrim(readline(s)));
+
+                if msg=="DONE" || startsWith(msg,"ERROR")
+                    status = msg;
+                    break;
+                end
+            end
+
+            pause(0.01);
+        end
+
+    else
+        pause(pulseDuration/1000);
+    end
+
+    %% 8. COLLECT RESPONSE
+
+    setappdata(fig,'Response',"");
+    setappdata(fig,'Submitted',false);
+    setappdata(fig,'Accept',true);
+
+    showText(ax, ...
+        "What did you feel?" + newline + ...
+        "A/B/C/D, two letters, or N" + newline + ...
+        "Press ENTER to submit");
+
+    responseClock = tic;
+
+    while toc(responseClock)<responseWindow && ...
+            ishandle(fig) && ...
+            ~getappdata(fig,'Abort')
+
+        drawnow;
+        pause(0.01);
+
+        if getappdata(fig,'Submitted')
+            break;
+        end
+    end
+
+    if ~ishandle(fig) || getappdata(fig,'Abort')
+        break;
+    end
+
+    response = getappdata(fig,'Response');
+    responseDelay = toc(responseClock);
+
+    setappdata(fig,'Accept',false);
+    setappdata(fig,'Submitted',false);
+
+    if strlength(response)==0
+        response = "TIMEOUT";
+    end
+
+    %% 9. SCORE RESPONSE
+
+    validTrial = ...
+        (status=="DONE" || status=="CATCH");
+
+    correct = false;
+    locationsCorrect = false;
+    orderCorrect = false;
+
+    if validTrial
+
+        if cond=="CATCH"
+
+            correct = response=="N";
+            locationsCorrect = correct;
+            orderCorrect = false;
+
+        elseif cond=="SINGLE"
+
+            correct = response==pat;
+            locationsCorrect = correct;
+            orderCorrect = false;
+
+        elseif cond=="SIM"
+
+            if strlength(response)==2
+
+                locationsCorrect = ...
+                    isequal(sort(char(response)), ...
+                    sort(char(pat)));
+
+                correct = locationsCorrect;
+            end
+
+        elseif cond=="SEQ"
+
+            if strlength(response)==2
+
+                locationsCorrect = ...
+                    isequal(sort(char(response)), ...
+                    sort(char(pat)));
+
+                orderCorrect = response==pat;
+                correct = orderCorrect;
+            end
+        end
+    end
+
+    %% 10. SAVE TRIAL
+
+    notes = "";
+
+    if ~validTrial
+        notes = "COMMAND_NOT_CONFIRMED";
+    end
+
+    newRow = { ...
+        t,currentBlock,cond,pat, ...
+        r1,r2,pulseDuration,interval, ...
+        response,logical(correct), ...
+        logical(locationsCorrect), ...
+        logical(orderCorrect), ...
+        status,responseDelay, ...
+        posixtime(datetime('now')), ...
+        double(validTrial),notes};
+
+    results = [results; ...
+        cell2table(newRow, ...
+        'VariableNames',results.Properties.VariableNames)];
+
+    writetable(results,filename);
+
+    fprintf( ...
+        'Trial %d/%d | Block %d | %s %s | Response %s | Correct %d | %s\n', ...
+        t,totalTrials,currentBlock, ...
+        cond,pat,response,correct,status);
+
+    pause(0.4);
+end
+
+%% 11. CLEANUP
+
+if ishandle(fig)
+    delete(fig);
+end
+
+fprintf('\nExperiment finished.\n');
+fprintf('Saved %d trials to:\n%s\n', ...
+    height(results),filename);
+
+%% 12. ACCURACY SUMMARY
+
+fprintf('\n===== RECOGNITION RESULTS =====\n');
+
+conditions = ["SINGLE","SIM","SEQ","CATCH"];
+
+for c = conditions
+
+    rows = results.Condition==c & ...
+        results.ValidTrial==1;
+
+    if any(rows)
+
+        n = sum(rows);
+        nCorrect = sum(results.Correct(rows));
+
+        accuracy = 100*nCorrect/n;
+
+        fprintf('%s: %d/%d = %.1f%%\n', ...
+            c,nCorrect,n,accuracy);
+    end
+end
+
+% Additional sequential analysis
+seqRows = results.Condition=="SEQ" & ...
+    results.ValidTrial==1;
+
+if any(seqRows)
+
+    nSeq = sum(seqRows);
+
+    locationAccuracy = ...
+        100*sum(results.LocationsCorrect(seqRows))/nSeq;
+
+    orderAccuracy = ...
+        100*sum(results.OrderCorrect(seqRows))/nSeq;
+
+    fprintf('\nSequential location accuracy: %.1f%%\n', ...
+        locationAccuracy);
+
+    fprintf('Sequential full-pattern accuracy: %.1f%%\n', ...
+        orderAccuracy);
+end
+
+disp('Results saved successfully.');
+
+%% LOCAL FUNCTIONS
+
+function showText(ax,msg)
+
+    cla(ax);
+
+    text(ax,0.5,0.5,msg, ...
+        'HorizontalAlignment','center', ...
+        'VerticalAlignment','middle', ...
+        'FontSize',16, ...
+        'Interpreter','none');
+
+    drawnow;
+end
+
+function keyResponse(src,event)
+
+    if strcmp(event.Key,'escape')
+        setappdata(src,'Abort',true);
+        return;
+    end
+
+    if ~getappdata(src,'Accept')
+        return;
+    end
+
+    if strcmp(event.Key,'return')
+        setappdata(src,'Submitted',true);
+        return;
+    end
+
+    key = upper(string(event.Key));
+
+    if any(key==["A","B","C","D","N"])
+
+        current = getappdata(src,'Response');
+
+        if strlength(current)<2
+            setappdata(src,'Response',current+key);
+        end
+
+    elseif strcmp(event.Key,'backspace')
+
+        current = getappdata(src,'Response');
+
+        if strlength(current)>0
+            setappdata(src,'Response', ...
+                extractBefore(current,strlength(current)));
+        end
+    end
+end
+
+function closeExperiment(src,~)
+
+    setappdata(src,'Abort',true);
+    delete(src);
+end
+
+function clearSerial(s)
+
+    try
+        writeline(s,"STOP");
+    catch
+    end
+end
