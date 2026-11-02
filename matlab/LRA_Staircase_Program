@@ -1,0 +1,299 @@
+%% LRA STAIRCASE EXPERIMENT - MODIFIED FROM WORKING VERSION
+% A=CH4 dorsal; B=CH5 radial; C=CH6 ulnar; D=CH7 volar
+% Uses existing Arduino commands: A,40,1000 etc.
+% Pink noise played externally. MATLAB figure keyboard callbacks.
+% This is a preliminary single-subject evaluation, not calibrated acceleration.
+clear; clc; close all;
+
+%% 1. SETTINGS (verify hardware safe drive range before wearing)
+port = "COM5";
+baud = 115200;
+motors = ["A","B","C","D"];
+locations = ["Dorsal","Radial","Ulnar","Volar"];
+pulseDuration = 1000;
+responseWindow = 1.5;
+minRTP = 2;
+maxRTP = 40;
+startRTP = 20;
+stepRTP = 2;
+targetReversals = 6;
+maxTrialsPerMotor = 45;
+catchProbability = 0.12;
+breakEvery = 25;
+
+nMotors = numel(motors);
+currentRTP = repmat(startRTP,1,nMotors);
+consecutiveDetected = zeros(1,nMotors);
+previousDirection = zeros(1,nMotors);
+reversalCount = zeros(1,nMotors);
+motorTrials = zeros(1,nMotors);
+reversalLevels = cell(1,nMotors);
+
+%% 2. CONNECT (same approach as previous working code)
+disp("Connecting to Arduino...");
+s = serialport(port,baud);
+configureTerminator(s,"LF");
+s.Timeout = 4;
+pause(2);
+flush(s);
+disp("Arduino connected.");
+
+%% 3. KEYBOARD WINDOW (same callbacks as previous working code)
+fig = figure('Name','LRA Detection Experiment', ...
+    'NumberTitle','off','MenuBar','none','ToolBar','none', ...
+    'Color','white','Position',[350 200 650 350], ...
+    'CloseRequestFcn',@closeExperiment);
+setappdata(fig,'Detected',false);
+setappdata(fig,'ResponseTime',NaN);
+setappdata(fig,'TrialClock',[]);
+setappdata(fig,'Abort',false);
+setappdata(fig,'AcceptResponse',false);
+fig.WindowKeyPressFcn = @recordKey;
+ax = axes('Parent',fig,'Position',[0 0 1 1],'Visible','off');
+text(ax,0.5,0.5,'Preparing experiment...', ...
+    'HorizontalAlignment','center','FontSize',18);
+
+%% 4. RESULTS + EARLY SAVE PATH
+results = table('Size',[0 13], ...
+    'VariableTypes',{'double','string','string','double','logical', ...
+    'logical','double','double','double','logical','double','string','double'}, ...
+    'VariableNames',{'Trial','Motor','Location','RTP','Detected', ...
+    'CatchTrial','ReactionTime','Reversals','NextRTP', ...
+    'IsReversal','ReversalRTP','ArduinoStatus','Timestamp'});
+timestamp = string(datetime('now','Format','yyyyMMdd_HHmmss'));
+filename = "LRA_Staircase_" + timestamp + ".csv";
+reversalFilename = "LRA_Reversals_" + timestamp + ".csv";
+writetable(results,filename);
+
+%% 5. INSTRUCTIONS
+fprintf('\n======================================\n');
+fprintf('LRA STAIRCASE EXPERIMENT - 4 MOTORS\n');
+fprintf('======================================\n');
+fprintf('Pink noise externally; press SPACE only if felt.\n');
+fprintf('ESC to stop; partial CSV is saved every trial.\n');
+fprintf('Stop: %d reversals OR %d motor trials per location.\n', ...
+    targetReversals,maxTrialsPerMotor);
+input('Press ENTER when ready to begin.','s');
+
+%% 6. RUN ADAPTIVE TRIALS
+trialNumber = 0;
+try
+    while ishandle(fig) && ~getappdata(fig,'Abort')
+        active = find(reversalCount < targetReversals & ...
+                      motorTrials < maxTrialsPerMotor);
+        if isempty(active)
+            break;
+        end
+
+        trialNumber = trialNumber + 1;
+        isCatch = rand < catchProbability;
+        if isCatch
+            motor = "CATCH";
+            location = "None";
+            motorIndex = 0;
+            rtp = 0;
+        else
+            motorIndex = active(randi(numel(active)));
+            motor = motors(motorIndex);
+            location = locations(motorIndex);
+            rtp = currentRTP(motorIndex);
+        end
+
+        cla(ax);
+        text(ax,0.5,0.5,sprintf('Trial %d\n\nGet ready',trialNumber), ...
+            'HorizontalAlignment','center','FontSize',18);
+        drawnow;
+        pause(1 + rand);
+        if ~ishandle(fig) || getappdata(fig,'Abort'), break; end
+
+        setappdata(fig,'Detected',false);
+        setappdata(fig,'ResponseTime',NaN);
+        setappdata(fig,'AcceptResponse',false);
+        figure(fig);
+        cla(ax);
+        text(ax,0.5,0.5,'Press SPACE if you feel a vibration', ...
+            'HorizontalAlignment','center','FontSize',16);
+        drawnow;
+
+        arduinoStatus = "CATCH";
+        if ~isCatch
+            command = sprintf('%s,%d,%d',motor,rtp,pulseDuration);
+            writeline(s,command);
+            arduinoStatus = "SENT";
+        end
+        setappdata(fig,'TrialClock',tic);
+        setappdata(fig,'AcceptResponse',true);
+        trialTimer = tic;
+        while toc(trialTimer) < responseWindow
+            if ~ishandle(fig), break; end
+            drawnow;
+            if getappdata(fig,'Abort'), break; end
+            pause(0.005);
+        end
+        if ~ishandle(fig) || getappdata(fig,'Abort'), break; end
+        setappdata(fig,'AcceptResponse',false);
+        detected = getappdata(fig,'Detected');
+        reactionTime = getappdata(fig,'ResponseTime');
+
+        if ~isCatch
+            deadline = tic;
+            while toc(deadline) < 3
+                if s.NumBytesAvailable > 0
+                    msg = string(strtrim(readline(s)));
+                    if msg == "DONE"
+                        arduinoStatus = "DONE";
+                        break;
+                    elseif startsWith(msg,"ERROR")
+                        arduinoStatus = msg;
+                        break;
+                    end
+                end
+                pause(0.01);
+            end
+            if arduinoStatus == "SENT", arduinoStatus = "TIMEOUT"; end
+        end
+
+        isReversal = false;
+        reversalRTP = NaN;
+        if ~isCatch
+            motorTrials(motorIndex) = motorTrials(motorIndex) + 1;
+            if arduinoStatus == "DONE"
+                direction = 0;
+                oldRTP = currentRTP(motorIndex);
+                if detected
+                    consecutiveDetected(motorIndex) = consecutiveDetected(motorIndex)+1;
+                    if consecutiveDetected(motorIndex) >= 3
+                        if oldRTP > minRTP
+                            currentRTP(motorIndex) = max(minRTP,oldRTP-stepRTP);
+                            direction = -1;
+                        end
+                        consecutiveDetected(motorIndex) = 0;
+                    end
+                else
+                    consecutiveDetected(motorIndex) = 0;
+                    if oldRTP < maxRTP
+                        currentRTP(motorIndex) = min(maxRTP,oldRTP+stepRTP);
+                        direction = 1;
+                    end
+                end
+                if direction ~= 0
+                    if previousDirection(motorIndex) ~= 0 && ...
+                            previousDirection(motorIndex) ~= direction
+                        reversalCount(motorIndex) = reversalCount(motorIndex)+1;
+                        isReversal = true;
+                        reversalRTP = oldRTP;
+                        reversalLevels{motorIndex}(end+1) = oldRTP;
+                    end
+                    previousDirection(motorIndex) = direction;
+                end
+            else
+                fprintf('WARNING: %s status %s; staircase not updated.\n', ...
+                    motor,arduinoStatus);
+            end
+            reversals = reversalCount(motorIndex);
+            nextRTP = currentRTP(motorIndex);
+        else
+            reversals = 0;
+            nextRTP = 0;
+        end
+
+        newRow = table(trialNumber,motor,location,double(rtp), ...
+            logical(detected),logical(isCatch),double(reactionTime), ...
+            double(reversals),double(nextRTP),logical(isReversal), ...
+            double(reversalRTP),string(arduinoStatus), ...
+            posixtime(datetime('now')), ...
+            'VariableNames',results.Properties.VariableNames);
+        results = [results;newRow];
+        writetable(results,filename); % preserve completed trials
+        fprintf('Trial %d | %s | RTP %d | Detected %d | %s | Reversals %d\n', ...
+            trialNumber,motor,rtp,detected,arduinoStatus,reversals);
+
+        if mod(trialNumber,breakEvery) == 0
+            fprintf('\nBREAK: pause as needed.\n');
+            cla(ax);
+            text(ax,0.5,0.5,'Break - press ENTER in Command Window', ...
+                'HorizontalAlignment','center','FontSize',16);
+            drawnow;
+            input('Press ENTER to continue (or close figure to stop).','s');
+        end
+        pause(0.5);
+    end
+catch ME
+    fprintf('Experiment error: %s\n',ME.message);
+end
+
+%% 7. CLEANUP AND SUMMARY
+if ishandle(fig), delete(fig); end
+clear s;
+writetable(results,filename);
+fprintf('\nSaved %d trials to %s\n',height(results),filename);
+
+revMotor = strings(0,1);
+revNumber = zeros(0,1);
+revRTP = zeros(0,1);
+for m = 1:nMotors
+    for k = 1:numel(reversalLevels{m})
+        revMotor(end+1,1) = motors(m);
+        revNumber(end+1,1) = k;
+        revRTP(end+1,1) = reversalLevels{m}(k);
+    end
+end
+reversalTable = table(revMotor,revNumber,revRTP, ...
+    'VariableNames',{'Motor','ReversalNumber','RTP'});
+writetable(reversalTable,reversalFilename);
+fprintf('Reversal data saved to %s\n',reversalFilename);
+
+for m = 1:nMotors
+    rows = results.Motor == motors(m) & results.ArduinoStatus == "DONE";
+    if any(rows)
+        fprintf('%s (%s): %d motor trials, %.1f%% detected, %d reversals', ...
+            motors(m),locations(m),sum(rows),100*mean(results.Detected(rows)), ...
+            reversalCount(m));
+        if numel(reversalLevels{m}) >= 6
+            lastLevels = reversalLevels{m}(end-3:end);
+            fprintf(', exploratory last-4 reversal mean RTP %.1f',mean(lastLevels));
+        else
+            fprintf(', insufficient reversals for exploratory estimate');
+        end
+        fprintf('\n');
+    end
+end
+catchRows = results.CatchTrial;
+if any(catchRows)
+    fprintf('Catch false alarms: %d/%d (%.1f%%)\n', ...
+        sum(results.Detected(catchRows)),sum(catchRows), ...
+        100*mean(results.Detected(catchRows)));
+end
+
+figure('Name','Staircase Progression'); hold on;
+for m = 1:nMotors
+    rows = results.Motor == motors(m) & results.ArduinoStatus == "DONE";
+    if any(rows)
+        plot(results.Trial(rows),results.RTP(rows),'-o', ...
+            'DisplayName',char(motors(m)+" - "+locations(m)));
+    end
+end
+xlabel('Global Trial Number'); ylabel('RTP Control Value');
+title('Four-Motor Staircase Progression');
+legend('Location','best'); grid on; hold off;
+disp('Experiment finished.');
+
+%% LOCAL FUNCTIONS (same keyboard handling as working version)
+function recordKey(src,event)
+    if strcmp(event.Key,'escape')
+        setappdata(src,'Abort',true);
+        return;
+    end
+    if ~getappdata(src,'AcceptResponse'), return; end
+    if strcmp(event.Key,'space') && ~getappdata(src,'Detected')
+        setappdata(src,'Detected',true);
+        clockValue = getappdata(src,'TrialClock');
+        if ~isempty(clockValue)
+            setappdata(src,'ResponseTime',toc(clockValue));
+        end
+    end
+end
+function closeExperiment(src,~)
+    setappdata(src,'Abort',true);
+    delete(src);
+end
