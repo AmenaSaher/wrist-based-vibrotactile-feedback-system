@@ -1,9 +1,18 @@
-%% LRA STAIRCASE EXPERIMENT - MODIFIED FROM WORKING VERSION
-% A=CH4 dorsal; B=CH5 radial; C=CH6 ulnar; D=CH7 volar
-% Uses existing Arduino commands: A,40,1000 etc.
-% Pink noise played externally. MATLAB figure keyboard callbacks.
-% This is a preliminary single-subject evaluation, not calibrated acceleration.
-clear; clc; close all;
+% Adaptive Vibration Detection Experiment
+%
+% Controls four LRAs positioned around the wrist using MATLAB and Arduino.
+% Implements independent 1-up/3-down adaptive staircases to evaluate
+% vibration detection at each wrist location.
+%
+% The program randomizes motor and catch trials, adjusts RTP values
+% based on detection responses, tracks staircase reversals, and
+% saves experimental results to a CSV file.
+%
+% Motor assignments:
+% A - Dorsal
+% B - Radial
+% C - Ulnar
+% D - Volar
 
 %% 1. SETTINGS (verify hardware safe drive range before wearing)
 port = "COM5";
@@ -22,6 +31,7 @@ catchProbability = 0.12;
 breakEvery = 25;
 
 nMotors = numel(motors);
+% Keep independent adaptive state for each of the four wrist locations.
 currentRTP = repmat(startRTP,1,nMotors);
 consecutiveDetected = zeros(1,nMotors);
 previousDirection = zeros(1,nMotors);
@@ -31,6 +41,7 @@ reversalLevels = cell(1,nMotors);
 
 %% 2. CONNECT (same approach as previous working code)
 disp("Connecting to Arduino...");
+% Open the USB serial connection to the motor-control firmware.
 s = serialport(port,baud);
 configureTerminator(s,"LF");
 s.Timeout = 4;
@@ -39,6 +50,7 @@ flush(s);
 disp("Arduino connected.");
 
 %% 3. KEYBOARD WINDOW (same callbacks as previous working code)
+% Create a keyboard-controlled response window for detection trials.
 fig = figure('Name','LRA Detection Experiment', ...
     'NumberTitle','off','MenuBar','none','ToolBar','none', ...
     'Color','white','Position',[350 200 650 350], ...
@@ -54,6 +66,7 @@ text(ax,0.5,0.5,'Preparing experiment...', ...
     'HorizontalAlignment','center','FontSize',18);
 
 %% 4. RESULTS + EARLY SAVE PATH
+% Define trial-level CSV columns before stimulation begins.
 results = table('Size',[0 13], ...
     'VariableTypes',{'double','string','string','double','logical', ...
     'logical','double','double','double','logical','double','string','double'}, ...
@@ -78,7 +91,9 @@ input('Press ENTER when ready to begin.','s');
 %% 6. RUN ADAPTIVE TRIALS
 trialNumber = 0;
 try
+    % Continue until all staircases finish or the experiment is aborted.
     while ishandle(fig) && ~getappdata(fig,'Abort')
+        % Exclude motors that already reached the reversal or trial limit.
         active = find(reversalCount < targetReversals & ...
                       motorTrials < maxTrialsPerMotor);
         if isempty(active)
@@ -86,6 +101,7 @@ try
         end
 
         trialNumber = trialNumber + 1;
+        % Insert occasional no-stimulation trials to check for false positives.
         isCatch = rand < catchProbability;
         if isCatch
             motor = "CATCH";
@@ -93,6 +109,7 @@ try
             motorIndex = 0;
             rtp = 0;
         else
+            % Randomly select an unfinished staircase for this stimulation trial.
             motorIndex = active(randi(numel(active)));
             motor = motors(motorIndex);
             location = locations(motorIndex);
@@ -279,6 +296,7 @@ legend('Location','best'); grid on; hold off;
 disp('Experiment finished.');
 
 %% LOCAL FUNCTIONS (same keyboard handling as working version)
+% Keyboard callback: record a SPACE press only while responses are accepted.
 function recordKey(src,event)
     if strcmp(event.Key,'escape')
         setappdata(src,'Abort',true);
@@ -293,6 +311,7 @@ function recordKey(src,event)
         end
     end
 end
+% Closing the figure signals the experiment loop to stop safely.
 function closeExperiment(src,~)
     setappdata(src,'Abort',true);
     delete(src);
