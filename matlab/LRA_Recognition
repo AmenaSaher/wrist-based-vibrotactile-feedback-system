@@ -1,27 +1,36 @@
 
-%% FOUR-LRA WRIST RECOGNITION EXPERIMENT
-% Block 1: Single motors (20 + 5 catch = 25 trials)
-% Block 2: Simultaneous pairs (30 + 5 catch = 35 trials)
-% Block 3: Sequential pairs (60 + 5 catch = 65 trials)
+%% FOUR-LRA WRIST LOCATION AND PATTERN RECOGNITION EXPERIMENT
+%
+% Evaluates recognition of single-motor, simultaneous-pair, and
+% sequential-pair vibrations at four wrist locations.
+%
+% Motor assignments:
+% A - Dorsal
+% B - Radial
+% C - Ulnar
+% D - Volar
+%
+% Experiment structure:
+% Block 1: Single motors (20 trials + 5 catch)
+% Block 2: Simultaneous pairs (30 trials + 5 catch)
+% Block 3: Sequential pairs (60 trials + 5 catch)
 % Total: 125 trials
 %
-% Requires compatible LRA_Recognition_Arduino firmware.
+% The program randomizes patterns within each block, collects responses,
+% calculates recognition accuracy, and saves results to a CSV file.
 %
-% Arduino commands:
-%   A,8,1000
-%   SIM,AB,8,12,1000
-%   SEQ,AB,8,12,1000
+% Requires LRA_Recognition_Arduino firmware.
 %
-% Sequential: second motor begins after first 1000 ms pulse.
-% ResponseDelaySec starts AFTER Arduino DONE.
+% Arduino command examples:
+% A,8,1000
+% SIM,AB,8,12,1000
+% SEQ,AB,8,12,1000
 %
-% IMPORTANT: Verify hardware, timing, motor mapping,
-% and safe/comfortable stimulation before testing.
-
+% ResponseDelaySec is recorded after the Arduino DONE message.
 clear; clc; close all;
-
 %% 1. EXPERIMENT SETTINGS
 
+% Match the serial port to the Arduino connection on this computer.
 port = "COM5";
 baud = 115200;
 
@@ -41,6 +50,7 @@ breakEvery = 25;
 
 rng('shuffle');
 
+% Build the fixed-order blocks; randomize the patterns within each block.
 %% 2. GENERATE BALANCED BLOCKED TRIALS
 
 kind = strings(0,1);
@@ -143,6 +153,7 @@ fprintf('Block 3: %d trials\n',sum(blockNumber==3));
 assert(totalTrials==125, ...
     'Unexpected trial count.');
 
+% Prepare the trial-by-trial results table and output CSV.
 %% 3. CREATE RESULTS FILE
 
 stamp = string(datetime('now', ...
@@ -166,6 +177,7 @@ results = table('Size',[0 17], ...
 
 writetable(results,filename);
 
+% Connect MATLAB to the Arduino motor-control firmware.
 %% 4. CONNECT TO ARDUINO
 
 disp('Connecting to Arduino...');
@@ -181,6 +193,7 @@ cleanupObj = onCleanup(@() clearSerial(s));
 
 disp('Arduino connected.');
 
+% Use the figure keyboard callback to collect typed recognition answers.
 %% 5. RESPONSE WINDOW
 
 fig = figure( ...
@@ -215,6 +228,7 @@ showText(ax, ...
 
 input('Press ENTER in MATLAB to begin.','s');
 
+% Present each pattern, wait for the firmware acknowledgment, then score the response.
 %% 6. RUN EXPERIMENT
 
 previousBlock = 0;
@@ -467,6 +481,7 @@ for t = 1:totalTrials
     pause(0.4);
 end
 
+% Release the experiment window and serial resources.
 %% 11. CLEANUP
 
 if ishandle(fig)
@@ -477,6 +492,7 @@ fprintf('\nExperiment finished.\n');
 fprintf('Saved %d trials to:\n%s\n', ...
     height(results),filename);
 
+% Summarize recognition performance separately for each stimulation condition.
 %% 12. ACCURACY SUMMARY
 
 fprintf('\n===== RECOGNITION RESULTS =====\n');
@@ -525,6 +541,7 @@ disp('Results saved successfully.');
 
 %% LOCAL FUNCTIONS
 
+% Display trial instructions and prompts in the participant window.
 function showText(ax,msg)
 
     cla(ax);
@@ -538,6 +555,7 @@ function showText(ax,msg)
     drawnow;
 end
 
+% Keyboard callback used to capture the participant response.
 function keyResponse(src,event)
 
     if strcmp(event.Key,'escape')
@@ -575,12 +593,14 @@ function keyResponse(src,event)
     end
 end
 
+% Mark an early stop when the experiment window is closed.
 function closeExperiment(src,~)
 
     setappdata(src,'Abort',true);
     delete(src);
 end
 
+% Flush pending serial data before continuing communication.
 function clearSerial(s)
 
     try
